@@ -67,6 +67,10 @@ def get_words() -> List[str]:
 
     short_word_list.json has 2_309 words
     long_word_list.json has 14_855 words
+
+    These word lists were copied from the js code in https://www.nytimes.com/games/wordle/index.html
+    using browser dev tools.  There seems to be a shorter list of more common words,
+    and a longer, more comprehensive list.
     """
     return json.loads(Path("short_word_list.json").read_text())
 
@@ -89,12 +93,15 @@ class Char:
     letter: str
     colour: Colour
 
-    def get_print_str(self):
+    def get_print_str(self, use_colours: bool = True) -> str:
         """Return the given char with extra chars to show colour in the terminal.
 
         TODO: could look into other packages to print colour to terminal.
         For now using this method because it does not require any dependencies.
         """
+        if not use_colours:
+            return self.letter
+
         if self.colour == Colour.GREEN:
             colour_start = "\033[92m"
         elif self.colour == Colour.YELLOW:
@@ -102,7 +109,7 @@ class Char:
         elif self.colour == Colour.GREY:
             colour_start = "\033[97m"
         else:
-            raise ValueError(f"Unexpected colour: {char.colour}")
+            raise ValueError(f"Unexpected colour: {self.colour}")
 
         colour_end = "\033[00m"
         return f"{colour_start}{self.letter}{colour_end}"
@@ -115,7 +122,7 @@ class Guess:
     chars: List[Char]
 
     @classmethod
-    def create_from_word(cls, word: str, solution):
+    def create_from_word(cls, word: str, solution: str) -> "Guess":
         """Return a Guess instance for the given word and solution."""
         chars = []
 
@@ -137,28 +144,30 @@ class Guess:
 
             # Note: for duplicate chars, wordle marks chars yellow up to a maximum of the
             # number in the solution.
-            # eg. if the guess is "boots" and the solution is "piano"
+            # See examples here https://nerdschalk.com/wordle-same-letter-twice-rules-explained-how-does-it-work/
+            # e.g. if the guess is "boots" and the solution is "piano"
             # the first "o" will be yellow, but the second will be grey.
-            other_unmatched_indices = [
-                j
-                for j, other_char in enumerate(chars)
-                if char.colour is None and j != i
-            ]
-            unmatched_solution_chars = [solution[i] for i in other_unmatched_indices]
-            if any(c == char.letter for c in unmatched_solution_chars):
-                char.colour = Colour.YELLOW
-            else:
-                char.colour = Colour.GREY
+            num_instances_in_solution = Counter(solution)[char.letter]
+            num_instances_recognised_so_far = sum(
+                1
+                for other_char in chars
+                if other_char.letter == char.letter
+                and other_char.colour in (Colour.GREEN, Colour.YELLOW)
+            )
+            should_be_yellow = (
+                num_instances_recognised_so_far < num_instances_in_solution
+            )
+            char.colour = Colour.YELLOW if should_be_yellow else Colour.GREY
 
         return cls(chars=chars)
 
-    def print(self):
+    def print(self) -> None:
         """Print the guess to the screen with chars coloured in green/yellow/grey."""
         print("".join(char.get_print_str() for char in self.chars))
 
     @property
-    def is_correct(self):
-        """Return True if the guess is correct, else False."""
+    def is_correct(self) -> bool:
+        """Return True if the guess is correct, otherwise False."""
         return all(char.colour == Colour.GREEN for char in self.chars)
 
 
@@ -169,7 +178,7 @@ ALL_CHARS = set("abcdefghijklmnopqrstuvwxyz")
 class Puzzle:
     """A single wordle puzzle.
 
-    keeps track of the state of the game eg. the solution, and what words have been guessed.
+    keeps track of the state of the game e.g. the solution, and what words have been guessed.
     """
 
     solution: str
@@ -178,14 +187,14 @@ class Puzzle:
     MAX_NUM_GUESSES = 6
     WORD_LENGTH = 5
 
-    def enter_word(self, word: str):
+    def enter_word(self, word: str) -> Guess:
         """Add the given word as a guess and return the guess object."""
 
         if len(self.guesses) >= self.MAX_NUM_GUESSES:
-            raise ValueError(f"exceeded max number of guesses {MAX_NUM_GUESSES}")
+            raise ValueError(f"exceeded max number of guesses {self.MAX_NUM_GUESSES}")
 
         if len(word) != self.WORD_LENGTH:
-            raise ValueError(f"Word {word} is not {WORD_LENGTH} chars long.")
+            raise ValueError(f"Word {word} is not {self.WORD_LENGTH} chars long.")
 
         # normalise words to lowercase
         word = word.lower()
@@ -199,7 +208,7 @@ class Puzzle:
         self.guesses.append(guess)
         return guess
 
-    def print(self):
+    def print(self) -> None:
         """Print all guesses."""
         for guess in self.guesses:
             guess.print()
@@ -323,9 +332,7 @@ def update_constraints(
             new_constraints.append(
                 Constraint(
                     char=char.letter,
-                    positions={
-                        i,
-                    },
+                    positions={i},
                     type=ConstraintType.IN_SOME_POSITION,
                 )
             )
@@ -342,28 +349,44 @@ def update_constraints(
             new_constraints.append(
                 Constraint(
                     char=char.letter,
-                    positions={
-                        i,
-                    },
+                    positions={i},
                     type=ConstraintType.NOT_IN_POSITIONS,
                 )
             )
         elif char.colour == Colour.GREY:
-            # The char is not in the word at all.
-            # Remove any existing constraints on this char
-            new_constraints = [
-                constraint
-                for constraint in new_constraints
-                if constraint.char != char.letter
-            ]
-            # Add constraint so that the char is never included
-            new_constraints.append(
-                Constraint(
-                    char=char.letter,
-                    positions=set(range(word_length)),
-                    type=ConstraintType.NOT_IN_POSITIONS,
-                )
+            # We need to be a little cautious here.  A char could be grey because:
+            # 1. It is not in the word at all.
+            # 2. It is a duplicate letter in the guess and there are fewer instances of the letter in the solution.
+            # To make sure we don't add an incorrect constraint, lets add a lighter constraint for duplicate chars
+
+            char_is_duplicate = (
+                Counter(char.letter for char in guess.chars)[char.letter] > 1
             )
+
+            if char_is_duplicate:
+                new_constraints.append(
+                    Constraint(
+                        char=char.letter,
+                        positions={i},
+                        type=ConstraintType.NOT_IN_POSITIONS,
+                    )
+                )
+            else:
+                # The char is not in the word at all.
+                # Remove any existing constraints on this char
+                new_constraints = [
+                    constraint
+                    for constraint in new_constraints
+                    if constraint.char != char.letter
+                ]
+                # Add constraint so that the char is never included
+                new_constraints.append(
+                    Constraint(
+                        char=char.letter,
+                        positions=set(range(word_length)),
+                        type=ConstraintType.NOT_IN_POSITIONS,
+                    )
+                )
         else:
             raise ValueError(f"Unexpected colour: {char.colour}")
 
@@ -406,7 +429,7 @@ def simulate(words: Optional[List[str]] = None) -> Tuple[bool, Optional[int]]:
         return False, None
 
 
-def run_simulations(num_simulations: int):
+def run_simulations(num_simulations: int) -> None:
     """Run multiple simulations and print summary statistics."""
     start_time = time.time()
     num_won = 0
@@ -431,5 +454,4 @@ def run_simulations(num_simulations: int):
 
 
 if __name__ == "__main__":
-    # simulate()
     run_simulations(100)
